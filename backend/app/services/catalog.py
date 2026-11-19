@@ -1,6 +1,7 @@
-﻿from datetime import datetime
+from collections import defaultdict
+from datetime import datetime
 from zoneinfo import ZoneInfo
-from sqlalchemy import inspect, or_
+from sqlalchemy import func, inspect, or_, select
 from app.core.errors import BusinessError
 from app.models.entities import Author, Book, BookAuthor, BookCopy, Category, LibraryCard, LoanItem, Publisher, Reservation, User
 from app.repositories.catalog import CatalogRepository
@@ -54,6 +55,51 @@ class CatalogService:
         self.db.delete(item)
         self.db.commit()
 
+    def books_data(self, books):
+        if not books:
+            return []
+        book_ids = [b.id for b in books]
+        category_ids = {b.the_loai_id for b in books if b.the_loai_id is not None}
+        publisher_ids = {b.nha_xuat_ban_id for b in books if b.nha_xuat_ban_id is not None}
+
+        categories = {c.id: c.ten_the_loai for c in self.db.scalars(select(Category).where(Category.id.in_(category_ids)))} if category_ids else {}
+        publishers = {p.id: p.ten_nxb for p in self.db.scalars(select(Publisher).where(Publisher.id.in_(publisher_ids)))} if publisher_ids else {}
+
+        author_rows = self.db.execute(
+            select(BookAuthor.sach_id, Author.id, Author.ho_ten)
+            .join(Author, Author.id == BookAuthor.tac_gia_id)
+            .where(BookAuthor.sach_id.in_(book_ids))
+            .order_by(Author.id)
+        ).all()
+        authors_by_book = defaultdict(list)
+        for sach_id, auth_id, ho_ten in author_rows:
+            authors_by_book[sach_id].append({'id': auth_id, 'ho_ten': ho_ten})
+
+        copy_rows = self.db.execute(
+            select(
+                BookCopy.sach_id,
+                func.count(BookCopy.id),
+                func.count(BookCopy.id).filter(BookCopy.tinh_trang == 'AVAILABLE')
+            )
+            .where(BookCopy.sach_id.in_(book_ids))
+            .group_by(BookCopy.sach_id)
+        ).all()
+        copies_by_book = {sach_id: (total, avail) for sach_id, total, avail in copy_rows}
+
+        results = []
+        for item in books:
+            res = record(item)
+            total_copies, available_copies = copies_by_book.get(item.id, (0, 0))
+            res.update(
+                authors=authors_by_book.get(item.id, []),
+                available_copies=available_copies,
+                total_copies=total_copies,
+                category_name=categories.get(item.the_loai_id, ''),
+                publisher_name=publishers.get(item.nha_xuat_ban_id, '')
+            )
+            results.append(res)
+        return results
+
     def book_data(self, item, detail=False):
         result = record(item)
         copies = self.repo.copies(item.id)
@@ -64,7 +110,7 @@ class CatalogService:
 
     def list_books(self, page, page_size, **filters):
         items, total = self.repo.books(page, page_size, **filters)
-        return dict(items=[self.book_data(item) for item in items], total=total, page=page, page_size=page_size)
+        return dict(items=self.books_data(items), total=total, page=page, page_size=page_size)
 
     def write_book(self, data, item_id=None):
         values = data.model_dump(exclude_unset=item_id is not None, mode='json')
@@ -136,7 +182,25 @@ class CatalogService:
         if search:
             conditions.append(or_(User.ho_ten.ilike(f'%{search}%'), User.email.ilike(f'%{search}%')))
         items, total = self.repo.page(User, page, page_size, conditions)
-        return dict(items=[self.reader_data(item) for item in items], total=total, page=page, page_size=page_size)
+        reader_ids = [item.id for item in items]
+        cards = {card.nguoi_dung_id: card for card in self.db.scalars(select(LibraryCard).where(LibraryCard.nguoi_dung_id.in_(reader_ids)))} if reader_ids else {}
+        return dict(
+            items=[
+                dict(
+                    id=reader.id,
+                    ho_ten=reader.ho_ten,
+                    email=reader.email,
+                    so_dien_thoai=reader.so_dien_thoai,
+                    vai_tro=reader.vai_tro,
+                    trang_thai=reader.trang_thai,
+                    ngay_tao=reader.ngay_tao,
+                    card=self.card_data(cards.get(reader.id))
+                ) for reader in items
+            ],
+            total=total,
+            page=page,
+            page_size=page_size
+        )
 
     def create_card(self, reader_id, data):
         reader = self.reader(reader_id, True)

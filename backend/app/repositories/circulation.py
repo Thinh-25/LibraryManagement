@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import datetime, UTC
 from sqlalchemy import select, func, update
 from app.core.errors import BusinessError
@@ -74,7 +75,47 @@ class CirculationRepository:
             conditions.append(LoanItem.trang_thai != "BORROWED")
         if status:
             query = query.where(select(LoanItem.id).where(*conditions).exists())
-        return self.page(query.order_by(Borrowing.ngay_muon.desc(), Borrowing.id.desc()), page, size, lambda row: self.borrowing_data(row, status))
+        ordered_query = query.order_by(Borrowing.ngay_muon.desc(), Borrowing.id.desc())
+        total = self.db.scalar(select(func.count()).select_from(ordered_query.order_by(None).subquery()))
+        rows = list(self.db.scalars(ordered_query.offset((page - 1) * size).limit(size)))
+        if not rows:
+            return {"items": [], "total": total, "page": page, "page_size": size}
+
+        borrowing_ids = [r.id for r in rows]
+        user_ids = {r.doc_gia_id for r in rows} | {r.thu_thu_id for r in rows}
+        users = {u.id: u.ho_ten for u in self.db.scalars(select(User).where(User.id.in_(user_ids)))} if user_ids else {}
+
+        all_items = self.db.scalars(select(LoanItem).where(LoanItem.phieu_muon_id.in_(borrowing_ids)).order_by(LoanItem.id)).all()
+        cuon_sach_ids = {i.cuon_sach_id for i in all_items}
+        copy_rows = self.db.execute(
+            select(BookCopy.id, BookCopy.ma_vach, Book.ten_sach)
+            .join(Book, Book.id == BookCopy.sach_id)
+            .where(BookCopy.id.in_(cuon_sach_ids))
+        ).all() if cuon_sach_ids else []
+        copy_map = {cid: (barcode, book_title) for cid, barcode, book_title in copy_rows}
+
+        now_utc = datetime.now(UTC)
+        items_by_borrowing = defaultdict(list)
+        for i in all_items:
+            if status == "borrowed" and i.trang_thai != "BORROWED":
+                continue
+            if status == "overdue" and not (i.trang_thai == "BORROWED" and i.han_tra < now_utc):
+                continue
+            if status == "history" and i.trang_thai == "BORROWED":
+                continue
+            barcode, book_title = copy_map.get(i.cuon_sach_id, ("", ""))
+            items_by_borrowing[i.phieu_muon_id].append({**record(i), "ten_sach": book_title, "ma_vach": barcode})
+
+        items = []
+        for row in rows:
+            res = {
+                **record(row),
+                "doc_gia_name": users.get(row.doc_gia_id, ""),
+                "thu_thu_name": users.get(row.thu_thu_id, ""),
+                "items": items_by_borrowing.get(row.id, [])
+            }
+            items.append(res)
+        return {"items": items, "total": total, "page": page, "page_size": size}
 
     def reservation_data(self, row):
         return {**record(row), "doc_gia_name": self.db.get(User, row.doc_gia_id).ho_ten,
@@ -86,7 +127,22 @@ class CirculationRepository:
             query = query.where(Reservation.doc_gia_id == reader_id)
         if status:
             query = query.where(Reservation.trang_thai == status)
-        return self.page(query.order_by(Reservation.ngay_dat.desc(), Reservation.id.desc()), page, size, self.reservation_data)
+        ordered_query = query.order_by(Reservation.ngay_dat.desc(), Reservation.id.desc())
+        total = self.db.scalar(select(func.count()).select_from(ordered_query.order_by(None).subquery()))
+        rows = list(self.db.scalars(ordered_query.offset((page - 1) * size).limit(size)))
+        if not rows:
+            return {"items": [], "total": total, "page": page, "page_size": size}
+
+        user_ids = {r.doc_gia_id for r in rows}
+        book_ids = {r.sach_id for r in rows}
+        users = {u.id: u.ho_ten for u in self.db.scalars(select(User).where(User.id.in_(user_ids)))} if user_ids else {}
+        books = {b.id: b.ten_sach for b in self.db.scalars(select(Book).where(Book.id.in_(book_ids)))} if book_ids else {}
+
+        items = [
+            {**record(row), "doc_gia_name": users.get(row.doc_gia_id, ""), "ten_sach": books.get(row.sach_id, "")}
+            for row in rows
+        ]
+        return {"items": items, "total": total, "page": page, "page_size": size}
 
     def fine_data(self, row):
         detail = self.db.get(LoanItem, row.chi_tiet_muon_id)
@@ -101,7 +157,29 @@ class CirculationRepository:
             query = query.join(LoanItem, Fine.chi_tiet_muon_id == LoanItem.id).join(Borrowing, LoanItem.phieu_muon_id == Borrowing.id).where(Borrowing.doc_gia_id == reader_id)
         if status:
             query = query.where(Fine.trang_thai == status)
-        return self.page(query.order_by(Fine.ngay_tao.desc(), Fine.id.desc()), page, size, self.fine_data)
+        ordered_query = query.order_by(Fine.ngay_tao.desc(), Fine.id.desc())
+        total = self.db.scalar(select(func.count()).select_from(ordered_query.order_by(None).subquery()))
+        rows = list(self.db.scalars(ordered_query.offset((page - 1) * size).limit(size)))
+        if not rows:
+            return {"items": [], "total": total, "page": page, "page_size": size}
+
+        fine_ids = [f.id for f in rows]
+        fine_details = self.db.execute(
+            select(Fine.id, Borrowing.doc_gia_id, User.ho_ten, Book.ten_sach)
+            .join(LoanItem, LoanItem.id == Fine.chi_tiet_muon_id)
+            .join(Borrowing, Borrowing.id == LoanItem.phieu_muon_id)
+            .join(User, User.id == Borrowing.doc_gia_id)
+            .join(BookCopy, BookCopy.id == LoanItem.cuon_sach_id)
+            .join(Book, Book.id == BookCopy.sach_id)
+            .where(Fine.id.in_(fine_ids))
+        ).all()
+        info_map = {fid: (uid, uname, btitle) for fid, uid, uname, btitle in fine_details}
+
+        items = []
+        for f in rows:
+            uid, uname, btitle = info_map.get(f.id, (None, "", ""))
+            items.append({**record(f), "doc_gia_id": uid, "doc_gia_name": uname, "ten_sach": btitle})
+        return {"items": items, "total": total, "page": page, "page_size": size}
 
     def reports(self, start, end):
         def bounds(column):

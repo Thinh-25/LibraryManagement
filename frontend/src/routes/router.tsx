@@ -7,7 +7,7 @@ const ForgotPasswordPage = lazy(() => import('../features/auth/AuthPages').then(
 const ProfilePage = lazy(() => import('../features/auth/AuthPages').then(module => ({default:module.ProfilePage})));
 const BooksPage = lazy(() => import('../features/books/BooksPages').then(module => ({default:module.BooksPage})));
 const BookDetailPage = lazy(() => import('../features/books/BooksPages').then(module => ({default:module.BookDetailPage})));
-import { ResourcePage } from '../components/ResourcePage';
+const ResourcePage = lazy(() => import('../components/ResourcePage').then(module => ({default:module.ResourcePage})));
 const ReadersPage = lazy(() => import('../features/readers/ReadersPage').then(module => ({default:module.ReadersPage})));
 const UsersPage = lazy(() => import('../features/users/UsersPages').then(module => ({default:module.UsersPage})));
 const ResetRequestsPage = lazy(() => import('../features/users/UsersPages').then(module => ({default:module.ResetRequestsPage})));

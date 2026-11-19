@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
@@ -18,6 +19,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.include_router(router, prefix="/api/v1")
 app.include_router(media_router)
 
